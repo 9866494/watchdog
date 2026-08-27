@@ -79,9 +79,9 @@ Mode: Startup (Intrapreneurship)
 
 ### MCP-транспорт
 
-**stdio** для v1 — стандарт для Claude Desktop. SSE отложен до появления удалённых клиентов.
+**stdio** для v1 — стандарт для opencode. SSE отложен до появления удалённых клиентов.
 
-**Claude Desktop config** (`claude_desktop_config.json`):
+**opencode config** (`opencode.json`):
 
 ```json
 {
@@ -106,36 +106,42 @@ Mode: Startup (Intrapreneurship)
 
 ### SQLite Schema (из tg-archive)
 
-tg-archive создаёт следующие таблицы (схема может отличаться в зависимости от версии — проверить при реализации):
+Реальная схема tg-archive (проверено на версии 1.3.1, коммит b8f3febaad1180cd581bed0ff07d582d012e8c0b):
 
 ```sql
--- Ключевые таблицы
 CREATE TABLE messages (
-    id INTEGER PRIMARY KEY,
-    chat_id INTEGER,
-    sender_id INTEGER,
-    date TIMESTAMP,
-    text TEXT,
-    reply_to_msg_id INTEGER,
-    -- ... media, forward info
+    id INTEGER NOT NULL PRIMARY KEY,
+    type TEXT NOT NULL,          -- "message", "user_joined", "user_left"
+    date TIMESTAMP NOT NULL,
+    edit_date TIMESTAMP,
+    content TEXT,                -- текст сообщения (НЕ "text")
+    reply_to INTEGER,            -- ID ответного сообщения (НЕ "reply_to_msg_id")
+    user_id INTEGER,             -- ID автора (НЕ "sender_id")
+    media_id INTEGER,
+    FOREIGN KEY(user_id) REFERENCES users(id),
+    FOREIGN KEY(media_id) REFERENCES media(id)
 );
 
 CREATE TABLE users (
-    id INTEGER PRIMARY KEY,
+    id INTEGER NOT NULL PRIMARY KEY,
     username TEXT,
     first_name TEXT,
     last_name TEXT,
-    bio TEXT,
-    -- ... avatar, status
+    tags TEXT,                   -- теги пользователя (НЕ "bio")
+    avatar TEXT
 );
 
-CREATE TABLE chats (
-    id INTEGER PRIMARY KEY,
+CREATE TABLE media (
+    id INTEGER NOT NULL PRIMARY KEY,
+    type TEXT,
+    url TEXT,
     title TEXT,
-    type TEXT,  -- group/supergroup/channel
-    -- ... description, participants count
+    description TEXT,
+    thumb TEXT
 );
 ```
+
+**Важно:** таблицы `chats` нет. tg-archive синхронизирует один чат (указан в config.yaml). Статистика агрегируется напрямую из `messages`.
 
 ### FTS5 Setup
 
@@ -143,7 +149,7 @@ FTS5-индекс создаётся в init-скрипте watchdog-mcp при 
 
 ```sql
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    text, sender_id, date,
+    content, user_id, date,      -- реальные имена колонок из tg-archive
     content='messages', content_rowid='id'
 );
 
@@ -152,12 +158,14 @@ INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
 
 -- Trigger для поддержания актуальности
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, text, sender_id, date)
-    VALUES (new.id, new.text, new.sender_id, new.date);
+    INSERT INTO messages_fts(rowid, content, user_id, date)
+    VALUES (new.id, new.content, new.user_id, new.date);
 END;
 ```
 
 Запускается один раз при старте MCP-сервера. Idempotent (`IF NOT EXISTS`).
+
+**Оптимизация:** FTS5 индекс создаётся ПОСЛЕ первой синхронизации (rebuild из существующих данных), а не до. Это избегает overhead триггера при bulk import тысяч сообщений.
 
 ### Конфигурация tg-archive
 
@@ -221,19 +229,19 @@ Signal-detection tools требуют LLM-интеграцию и prompt enginee
 ## Success Criteria
 
 - **Неделя 1:** tg-archive в Docker, сессия стабильна, SQLite содержит сообщения и профили одного чата. Синхронизация работает 7 дней без ошибок.
-- **Неделя 2:** MCP-сервер отвечает на `search_messages`, `get_user_profiles`, `get_chat_stats`. Claude Desktop подключён и выдаёт ответы с цитатами.
+- **Неделя 2:** MCP-сервер отвечает на `search_messages`, `get_user_profiles`, `get_chat_stats`. opencode подключён и выдаёт ответы с цитатами.
 - **Демо:** агент отвечает на вопрос продакта с цитатами из конкретного чата. Спонсор сказал «продолжай» — получен ресурс на развитие.
 - **MCP tools:** все три v1 tool'а отвечают за <2 секунды
 
 ## Distribution Plan
 
-**Для интрапренёрства:** Docker Compose на внутреннем VPS. Доступ через MCP-конфиг в Claude Desktop у продакт-менеджера.
+**Для интрапренёрства:** Docker Compose на внутреннем VPS. Доступ через MCP-конфиг в opencode у продакт-менеджера.
 
 **Деплой:** `docker build` + `scp` на VPS. CI/CD (GitHub Actions + registry) отложен до появления второго потребителя.
 
 **Потребитель получает доступ** через:
 1. `docker compose up -d` на VPS
-2. Настройка MCP-сервера в Claude Desktop (один JSON-файл)
+2. Настройка MCP-сервера в opencode (один JSON-файл)
 3. Чат с агентом = использование системы
 
 ## Data Retention
