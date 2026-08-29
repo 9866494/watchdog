@@ -1,18 +1,14 @@
 FROM python:3.11-slim
 
-# Пин на конкретный коммит (нет релизов у tg-archive)
-# https://github.com/knadh/tg-archive/commit/master
-ARG TG_ARCHIVE_COMMIT=master
-
 WORKDIR /app
 
-# Системные зависимости
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-# Установка tg-archive из git с пином на коммит
-RUN pip install --no-cache-dir git+https://github.com/knadh/tg-archive.git@${TG_ARCHIVE_COMMIT}
+# Установка tg-archive из форка с поддержкой нескольких чатов и топиков.
+# Форк приватный, поэтому исходники вендорятся в vendor/tg-archive-fork
+# (gitignored; обновление: git clone https://github.com/9866494/tg-archive-fork.git
+# в tg-archive/vendor/tg-archive-fork).
+COPY vendor/tg-archive-fork /tmp/tg-archive-fork
+RUN pip install --no-cache-dir /tmp/tg-archive-fork \
+    && rm -rf /tmp/tg-archive-fork
 
 # Entrypoint для генерации config.yaml из env
 COPY entrypoint.sh /entrypoint.sh

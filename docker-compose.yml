@@ -16,8 +16,10 @@ services:
     profiles:
       - sync
 
-  # watchdog-mcp: MCP-сервер для чтения данных
-  # Запуск: docker compose up -d watchdog-mcp
+  # watchdog-mcp: MCP-сервер для чтения данных (stdio transport)
+  # НЕ запускается в фоне — stdio-сервер живёт пока подключён клиент.
+  # MCP-клиент (opencode) сам спавнит его через:
+  #   docker run -i --rm -v telegram_data:/data -e WATCHDOG_DB_PATH=/data/data.sqlite watchdog-watchdog-mcp
   watchdog-mcp:
     build:
       context: ./watchdog-mcp
@@ -25,8 +27,8 @@ services:
       - telegram_data:/data
     environment:
       - WATCHDOG_DB_PATH=/data/data.sqlite
-    restart: unless-stopped
-    # Сеть для доступа от Claude Desktop
+    profiles:
+      - mcp
     networks:
       - default
 

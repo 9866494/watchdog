@@ -22,6 +22,9 @@ Thumbs.db
 # Docker
 docker-compose.override.yml
 
+# Вендор приватного форка tg-archive (обновляется вручную, см. tg-archive/Dockerfile)
+tg-archive/vendor/
+
 # Environment
 .env
 .env.local

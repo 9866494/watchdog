@@ -4,8 +4,10 @@ Watchdog MCP Server
 MCP-сервер для мониторинга Telegram-чатов через данные tg-archive.
 Читает SQLite БД и отдаёт MCP tools для поиска и анализа.
 
-Схема БД (из tg-archive):
-- messages: id, type, date, edit_date, content, reply_to, user_id, media_id
+Схема БД (из форка tg-archive с поддержкой нескольких чатов и топиков):
+- messages: id, chat_id, thread_id, type, date, edit_date, content, reply_to, user_id, media_id
+  (PRIMARY KEY (id, chat_id); thread_id — топик форума, если чат с топиками)
+- messages_fts: FTS5(content, chat_id UNINDEXED, thread_id UNINDEXED), rowid = messages.rowid
 - users: id, username, first_name, last_name, tags, avatar
 - media: id, type, url, title, description, thumb
 """
@@ -14,11 +16,12 @@ import logging
 import os
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 # Логирование в stderr (не stdout!) для stdio транспорта
 logging.basicConfig(
@@ -38,7 +41,10 @@ mcp = MCPServer("watchdog")
 def get_db() -> sqlite3.Connection:
     """Получить соединение с БД."""
     if not Path(DB_PATH).exists():
-        raise FileNotFoundError(f"База данных не найдена: {DB_PATH}")
+        raise ToolError(
+            f"База данных не найдена: {DB_PATH}. "
+            "Запустите синхронизацию: docker compose run --rm tg-archive --new"
+        )
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -61,6 +67,16 @@ def init_db():
     conn.execute("PRAGMA journal_mode=WAL")
     logger.info("WAL mode включён")
 
+    # Миграция со старой схемы (один чат): колонки chat_id/thread_id
+    cursor = conn.execute("PRAGMA table_info(messages)")
+    cols = [row[1] for row in cursor.fetchall()]
+    if "chat_id" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN chat_id INTEGER")
+        logger.info("Добавлена колонка messages.chat_id")
+    if "thread_id" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN thread_id INTEGER")
+        logger.info("Добавлена колонка messages.thread_id")
+
     # Проверка существования FTS5 индекса
     cursor = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='messages_fts'"
@@ -68,25 +84,42 @@ def init_db():
     fts_exists = cursor.fetchone() is not None
 
     if not fts_exists:
-        logger.info("Создаю FTS5 индекс...")
+        logger.info("Создаю FTS5 индекс (схема форка: content + UNINDEXED chat_id/thread_id)...")
 
-        # FTS5 индекс по content, user_id, date
+        # FTS5 индекс по content с UNINDEXED-колонками для фильтрации по чату/топику
         conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-                content, user_id, date,
-                content='messages', content_rowid='id'
+            CREATE VIRTUAL TABLE messages_fts USING fts5(
+                content,
+                chat_id UNINDEXED,
+                thread_id UNINDEXED
             )
         """)
 
-        # Rebuild индекса из существующих данных
-        logger.info("Rebuild FTS5 индекса из существующих сообщений...")
-        conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
-
-        # Триггер для автообновления FTS5 при новых сообщениях
+        # Заполнение индекса из существующих сообщений
         conn.execute("""
-            CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-                INSERT INTO messages_fts(rowid, content, user_id, date)
-                VALUES (new.id, new.content, new.user_id, new.date);
+            INSERT INTO messages_fts (rowid, content, chat_id, thread_id)
+            SELECT rowid, content, chat_id, thread_id FROM messages
+        """)
+
+        # Триггеры синхронизации с messages (совпадают с триггерами форка)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, content, chat_id, thread_id)
+                VALUES (new.rowid, new.content, new.chat_id, new.thread_id);
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, chat_id, thread_id)
+                VALUES ('delete', old.rowid, old.content, old.chat_id, old.thread_id);
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, chat_id, thread_id)
+                VALUES ('delete', old.rowid, old.content, old.chat_id, old.thread_id);
+                INSERT INTO messages_fts(rowid, content, chat_id, thread_id)
+                VALUES (new.rowid, new.content, new.chat_id, new.thread_id);
             END
         """)
 
@@ -142,6 +175,8 @@ async def search_messages(
     query: str,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    chat_id: Optional[int] = None,
+    thread_id: Optional[int] = None,
     limit: int = 50,
 ) -> list[dict]:
     """
@@ -151,27 +186,42 @@ async def search_messages(
         query: Поисковый запрос (поддерживает FTS5 синтаксис: "точное совпадение", OR, NOT)
         date_from: Начальная дата (ISO 8601: "2024-01-01" или "2024-01-01T10:00:00")
         date_to: Конечная дата (ISO 8601)
+        chat_id: Фильтр по chat_id (числовой ID чата, например -1001234567890)
+        thread_id: Фильтр по thread_id (ID топика форума внутри чата)
         limit: Максимальное количество результатов (по умолчанию 50)
 
     Returns:
-        Список сообщений: id, content, user_id, date, reply_to
+        Список сообщений: id, chat_id, thread_id, content, user_id, date, reply_to
     """
     conn = get_db()
 
     # Парсинг дат
-    date_from_parsed = parse_date(date_from)
-    date_to_parsed = parse_date(date_to)
+    try:
+        date_from_parsed = parse_date(date_from)
+        date_to_parsed = parse_date(date_to)
+    except ValueError as e:
+        raise ToolError(str(e)) from e
 
-    # Построение запроса
+    # Построение запроса.
+    # ВАЖНО: join по m.rowid = fts.rowid — FTS-индекс форка хранит rowid
+    # таблицы messages, а id входит в составной ключ (id, chat_id).
     sql = """
-        SELECT m.id, m.content, m.user_id, m.date, m.reply_to,
+        SELECT m.id, m.chat_id, m.thread_id, m.content, m.user_id, m.date, m.reply_to,
                u.username, u.first_name, u.last_name
         FROM messages_fts fts
-        JOIN messages m ON m.id = fts.rowid
+        JOIN messages m ON m.rowid = fts.rowid
         LEFT JOIN users u ON u.id = m.user_id
         WHERE messages_fts MATCH ?
     """
     params = [query]
+
+    if chat_id is not None:
+        sql += " AND m.chat_id = ?"
+        params.append(chat_id)
+
+    if thread_id is not None:
+        sql += " AND m.thread_id = ?"
+        params.append(thread_id)
 
     if date_from_parsed:
         sql += " AND m.date >= ?"
@@ -191,6 +241,8 @@ async def search_messages(
     for row in rows:
         results.append({
             "id": row["id"],
+            "chat_id": row["chat_id"],
+            "thread_id": row["thread_id"],
             "content": row["content"],
             "user_id": row["user_id"],
             "date": row["date"],
@@ -249,7 +301,8 @@ async def get_chat_stats(period: str) -> dict:
         period: Период: "day" (сегодня), "week" (последние 7 дней), "month" (последние 30 дней)
 
     Returns:
-        Статистика: message_count, active_users, top_authors (топ-10)
+        Статистика: message_count, active_users, top_authors (топ-10),
+        chats (разбивка по chat_id: сообщения, авторы, топики)
     """
     conn = get_db()
 
@@ -259,12 +312,12 @@ async def get_chat_stats(period: str) -> dict:
         date_from = now.replace(hour=0, minute=0, second=0, microsecond=0)
     elif period == "week":
         date_from = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        date_from = date_from.replace(day=date_from.day - 6)
+        date_from = date_from - timedelta(days=6)
     elif period == "month":
         date_from = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        date_from = date_from.replace(day=date_from.day - 29)
+        date_from = date_from - timedelta(days=29)
     else:
-        raise ValueError(f"Неверный период: {period}. Ожидается: day, week, month")
+        raise ToolError(f"Неверный период: {period}. Ожидается: day, week, month")
 
     date_from_str = date_from.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -304,6 +357,27 @@ async def get_chat_stats(period: str) -> dict:
             "message_count": row["message_count"],
         })
 
+    # Разбивка по чатам и топикам за период
+    cursor = conn.execute("""
+        SELECT chat_id,
+               COUNT(*) as message_count,
+               COUNT(DISTINCT user_id) as active_users,
+               COUNT(DISTINCT thread_id) as topic_count
+        FROM messages
+        WHERE date >= ?
+        GROUP BY chat_id
+        ORDER BY message_count DESC
+    """, [date_from_str])
+
+    chats = []
+    for row in cursor.fetchall():
+        chats.append({
+            "chat_id": row["chat_id"],
+            "message_count": row["message_count"],
+            "active_users": row["active_users"],
+            "topic_count": row["topic_count"],
+        })
+
     conn.close()
 
     return {
@@ -312,6 +386,7 @@ async def get_chat_stats(period: str) -> dict:
         "message_count": message_count,
         "active_users": active_users,
         "top_authors": top_authors,
+        "chats": chats,
     }
 
 
