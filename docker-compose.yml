@@ -25,6 +25,7 @@ services:
       context: ./watchdog-mcp
     volumes:
       - telegram_data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - WATCHDOG_DB_PATH=/data/data.sqlite
     profiles:
