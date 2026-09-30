@@ -1,6 +1,7 @@
 # Watchdog
 
-Мониторинг Telegram-чатов через MCP-сервер. Пассивно наблюдает за группой, собирает сообщения и профили участников, отдаёт данные через MCP tools для анализа.
+Мониторинг Telegram-чатов через MCP-сервер. Пассивно наблюдает за группами,
+собирает сообщения и профили участников, отдаёт данные через MCP tools для анализа.
 
 ## Архитектура
 
@@ -11,106 +12,103 @@
 └─────────────────┘      └──────────────────┘      └────────┬────────┘
                                                              │
                                                              ▼
-                                                    ┌─────────────────┐
-                                                    │  watchdog-mcp   │
-                                                    │  (Python MCP)   │
-                                                    └────────┬────────┘
-                                                             │
-                                                             ▼
+                                                     ┌─────────────────┐
+                                                     │  watchdog-mcp   │
+                                                     │  (Python MCP)   │
+                                                     └────────┬────────┘
+                                                              │
+                                                              ▼
 ┌─────────────────┐
-│     opencode    │
-│  (MCP Client)   │
+│   MCP-клиент    │   opencode, openclaw, любой stdio-клиент
 └─────────────────┘
 ```
 
 ## Требования
 
-- Docker и Docker Compose
-- Telegram API credentials (api_id, api_hash)
+- git, Docker, Docker Compose v2
+- Telegram API credentials (api_id, api_hash) с https://my.telegram.org
 - Отдельный аккаунт Telegram для юзербота (не личный!)
-- ID целевого чата для мониторинга
+- PTY-терминал для первой авторизации (SMS-код вводится интерактивно)
 
-## Быстрый старт
-
-### 1. Получить Telegram API credentials
-
-1. Перейти на https://my.telegram.org/auth?to=apps
-2. Войти с номера телефона отдельного аккаунта
-3. Создать приложение → получить `api_id` и `api_hash`
-
-### 2. Узнать ID чата
-
-- Добавить бота [@userinfobot](https://t.me/userinfobot) в целевой чат
-- Или переслать любое сообщение из чата боту [@getidsbot](https://t.me/getidsbot)
-- Скопировать числовой ID (начинается с `-` для групп)
-
-### 3. Настроить .env
+## Быстрый старт (одна команда на каждый шаг)
 
 ```bash
-cp .env.example .env
+git clone https://github.com/9866494/watchdog.git && cd watchdog
+cp .env.example .env          # заполнить TG_API_ID, TG_API_HASH, TG_PHONE, TG_CHAT_IDS
+./scripts/bootstrap.sh
 ```
 
-Заполнить `.env`:
-```
-TG_API_ID=12345678
-TG_API_HASH=abcdef1234567890abcdef1234567890
-TG_PHONE=+79991234567
-TG_CHAT_IDS=-1001234567890
-```
+`bootstrap.sh` сам проверит окружение, соберёт образы, проведёт авторизацию
+(спросит телефон и SMS-код в терминале), синхронизирует чаты и проверит,
+что MCP-сервер отвечает. Повторный запуск делает только недостающие шаги.
 
-### 4. Первый запуск tg-archive (интерактивный)
+Не знаешь ID чата? Получи список после авторизации:
 
 ```bash
-docker compose run --rm tg-archive --sync
+./scripts/bootstrap.sh --chats   # id=... title=... по всем диалогам аккаунта
 ```
 
-При первом запуске Telethon запросит номер телефона и SMS-код для авторизации. После успешного входа создастся `session.session` в Docker volume.
-
-**Важно:** флаг `--new` авторизацию не выполняет — он копирует шаблон сайта. Авторизация всегда происходит при первом `--sync`.
-
-### 5. Синхронизация сообщений
+Впиши нужный ID в `TG_CHAT_IDS` в `.env`, удали stale-конфиг и досинхронизируйся:
 
 ```bash
-docker compose run --rm tg-archive --sync
+docker run --rm -v telegram_data:/data alpine rm -f /data/config.yaml
+./scripts/bootstrap.sh --sync
 ```
 
-Скачает историю чата в SQLite. Повторять периодически для обновления данных.
-
-### 6. Запуск MCP-сервера
+### Режимы bootstrap
 
 ```bash
-docker compose up -d watchdog-mcp
+./scripts/bootstrap.sh --check   # проверки: docker, .env, сессия, БД
+./scripts/bootstrap.sh --build   # пересборка образов
+./scripts/bootstrap.sh --sync    # инкрементальная синхронизация
+./scripts/bootstrap.sh --chats   # список чатов аккаунта
+./scripts/bootstrap.sh --verify  # stdio handshake MCP-сервера
 ```
 
-MCP-сервер запустится в фоне, инициализирует FTS5 индекс и будет готов принимать запросы.
+## Получение Telegram API credentials
 
-### 7. Настройка opencode
+1. https://my.telegram.org/auth?to=apps — войти с номера **отдельного** аккаунта
+2. Создать приложение: App title — любое, Short name — 5–32 символа латиницей
+3. Скопировать `api_id` (число) и `api_hash` (32 hex-символа) в `.env`
 
-Создать `opencode.json` в корне проекта:
+Если my.telegram.org выдаёт ошибку — отключить VPN/прокси и попробовать другой браузер.
+
+## Подключение MCP-клиента
+
+MCP-сервер — stdio-процесс, клиент спавнит его сам. Универсальная команда:
+
+```
+docker run -i --rm -v telegram_data:/data -e WATCHDOG_DB_PATH=/data/data.sqlite watchdog-mcp:latest
+```
+
+### opencode
+
+Готовый конфиг уже в репозитории (`opencode.json`). Для другого проекта — скопировать
+блок `mcp` из него. Перезапустить opencode после изменения конфига.
+
+### Claude Code и другие клиенты с JSON-конфигом
 
 ```json
 {
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
+  "mcpServers": {
     "watchdog": {
-      "type": "local",
-      "command": [
-        "docker", "run", "-i", "--rm",
-        "-v", "telegram_data:/data",
-        "-e", "WATCHDOG_DB_PATH=/data/data.sqlite",
-        "watchdog-watchdog-mcp:latest"
-      ],
-      "enabled": true
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-v", "telegram_data:/data",
+               "-e", "WATCHDOG_DB_PATH=/data/data.sqlite", "watchdog-mcp:latest"]
     }
   }
 }
 ```
 
-Перезапустить opencode (конфиг читается только при старте). Теперь доступны инструменты:
+### Tools MCP-сервера
+
 - `search_messages` — полнотекстовый поиск по сообщениям
-- `get_user_profiles` — список участников чата
 - `get_chat_stats` — статистика активности за день/неделю/месяц
-- и ещё 12 tools (topics, activity, media, управление чатами и синхронизацией)
+- `get_chat_topics` — топики (треды) чата
+- `get_user_profiles`, `get_user_activity` — участники и их активность
+- `get_recent_messages`, `get_message_by_id` — чтение сообщений
+- `get_media`, `get_chats`, `get_chat_activity`
+- `list_available_chats`, `add_chat`, `remove_chat`, `run_sync`, `authorize` — управление синхронизацией и авторизацией через контейнер tg-archive
 
 ## Структура проекта
 
@@ -118,12 +116,18 @@ MCP-сервер запустится в фоне, инициализирует 
 watchdog/
 ├── .env                    # Секреты (не в git)
 ├── .env.example            # Шаблон .env
-├── docker-compose.yml      # Оркестрация контейнеров
+├── opencode.json           # MCP-конфиг для opencode
+├── docker-compose.yml      # Оркестрация контейнеров (стабильные имена образов)
+├── scripts/
+│   └── bootstrap.sh        # Автоматический сетап: проверки → build → auth → sync → verify
+├── docs/
+│   └── auth-guide.md       # Подробное руководство по авторизации и смене аккаунта/чата
 ├── tg-archive/
-│   ├── Dockerfile          # Образ для tg-archive
+│   ├── Dockerfile          # Образ tg-archive (форк вендорен в vendor/)
+│   ├── vendor/tg-archive-fork  # Исходники форка (в git)
 │   └── entrypoint.sh       # Генерация config.yaml из env
 └── watchdog-mcp/
-    ├── Dockerfile          # Образ для MCP-сервера
+    ├── Dockerfile          # Образ MCP-сервера
     ├── requirements.txt    # Python зависимости
     └── server.py           # MCP-сервер с tools
 ```
@@ -141,28 +145,28 @@ FTS5 индекс создаётся автоматически при перв�
 ## Команды
 
 ```bash
-# Первый запуск (интерактивная авторизация + синхронизация)
-docker compose run --rm tg-archive --sync
+# Полный сетап с нуля (авторизация + синхронизация + проверка)
+./scripts/bootstrap.sh
 
-# Синхронизация (скачать новые сообщения)
-docker compose run --rm tg-archive --sync
-
-# Запуск MCP-сервера
-docker compose up -d watchdog-mcp
-
-# Остановка MCP-сервера
-docker compose down
-
-# Логи MCP-сервера
-docker compose logs -f watchdog-mcp
+# Инкрементальная синхронизация
+./scripts/bootstrap.sh --sync
 
 # Проверка статуса
-docker compose ps
+./scripts/bootstrap.sh --check
+
+# Остановка и очистка
+docker compose --profile sync --profile mcp down
+
+# Логи последнего прогона синхронизации — в выводе команды --sync
 ```
+
+Синхронизация хранит данные в Docker volume `telegram_data` — переживает
+пересоздание контейнеров и обновление репозитория.
 
 ## Разработка
 
-MCP-сервер написан на Python с использованием официального SDK `mcp[cli]`. Логирование идёт в stderr (не stdout), чтобы не ломать JSON-RPC через stdio.
+MCP-сервер написан на Python с использованием SDK `mcp[cli]`. Логирование идёт
+в stderr (не stdout), чтобы не ломать JSON-RPC через stdio.
 
 Для локальной разработки без Docker:
 

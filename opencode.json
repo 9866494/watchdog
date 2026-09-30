@@ -12,7 +12,7 @@
         "telegram_data:/data",
         "-e",
         "WATCHDOG_DB_PATH=/data/data.sqlite",
-        "watchdog-watchdog-mcp:latest"
+        "watchdog-mcp:latest"
       ],
       "enabled": true
     }

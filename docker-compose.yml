@@ -5,6 +5,7 @@ services:
   tg-archive:
     build:
       context: ./tg-archive
+    image: watchdog-tg-archive:latest
     volumes:
       - telegram_data:/data
     environment:
@@ -18,11 +19,12 @@ services:
 
   # watchdog-mcp: MCP-сервер для чтения данных (stdio transport)
   # НЕ запускается в фоне — stdio-сервер живёт пока подключён клиент.
-  # MCP-клиент (opencode) сам спавнит его через:
-  #   docker run -i --rm -v telegram_data:/data -e WATCHDOG_DB_PATH=/data/data.sqlite watchdog-watchdog-mcp
+  # MCP-клиент сам спавнит его через:
+  #   docker run -i --rm -v telegram_data:/data -e WATCHDOG_DB_PATH=/data/data.sqlite watchdog-mcp:latest
   watchdog-mcp:
     build:
       context: ./watchdog-mcp
+    image: watchdog-mcp:latest
     volumes:
       - telegram_data:/data
       - /var/run/docker.sock:/var/run/docker.sock
