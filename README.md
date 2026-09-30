@@ -61,10 +61,12 @@ TG_CHAT_IDS=-1001234567890
 ### 4. Первый запуск tg-archive (интерактивный)
 
 ```bash
-docker compose run --rm tg-archive --new
+docker compose run --rm tg-archive --sync
 ```
 
-Команда запросит номер телефона и SMS-код для авторизации. После успешной авторизации создастся `session.session` в Docker volume.
+При первом запуске Telethon запросит номер телефона и SMS-код для авторизации. После успешного входа создастся `session.session` в Docker volume.
+
+**Важно:** флаг `--new` авторизацию не выполняет — он копирует шаблон сайта. Авторизация всегда происходит при первом `--sync`.
 
 ### 5. Синхронизация сообщений
 
@@ -84,23 +86,31 @@ MCP-сервер запустится в фоне, инициализирует 
 
 ### 7. Настройка opencode
 
-Добавить в `opencode.json`:
+Создать `opencode.json` в корне проекта:
 
 ```json
 {
-  "mcpServers": {
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
     "watchdog": {
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "--network", "watchdog_default", "watchdog-mcp"]
+      "type": "local",
+      "command": [
+        "docker", "run", "-i", "--rm",
+        "-v", "telegram_data:/data",
+        "-e", "WATCHDOG_DB_PATH=/data/data.sqlite",
+        "watchdog-watchdog-mcp:latest"
+      ],
+      "enabled": true
     }
   }
 }
 ```
 
-Перезапустить opencode. Теперь доступны инструменты:
+Перезапустить opencode (конфиг читается только при старте). Теперь доступны инструменты:
 - `search_messages` — полнотекстовый поиск по сообщениям
 - `get_user_profiles` — список участников чата
 - `get_chat_stats` — статистика активности за день/неделю/месяц
+- и ещё 12 tools (topics, activity, media, управление чатами и синхронизацией)
 
 ## Структура проекта
 
@@ -131,8 +141,8 @@ FTS5 индекс создаётся автоматически при перв�
 ## Команды
 
 ```bash
-# Первый запуск (интерактивная авторизация)
-docker compose run --rm tg-archive --new
+# Первый запуск (интерактивная авторизация + синхронизация)
+docker compose run --rm tg-archive --sync
 
 # Синхронизация (скачать новые сообщения)
 docker compose run --rm tg-archive --sync

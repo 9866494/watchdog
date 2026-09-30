@@ -1,0 +1,20 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "watchdog": {
+      "type": "local",
+      "command": [
+        "docker",
+        "run",
+        "-i",
+        "--rm",
+        "-v",
+        "telegram_data:/data",
+        "-e",
+        "WATCHDOG_DB_PATH=/data/data.sqlite",
+        "watchdog-watchdog-mcp:latest"
+      ],
+      "enabled": true
+    }
+  }
+}

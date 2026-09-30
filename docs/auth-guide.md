@@ -78,8 +78,8 @@ orca terminal create --worktree active --title "tg-archive auth" --json
 
 # Получить handle из вывода (например term_abc123...)
 
-# Отправить команду авторизации
-orca terminal send --terminal <handle> --text "docker compose run --rm tg-archive --new" --enter --json
+# Отправить команду синхронизации (первый запуск = авторизация)
+orca terminal send --terminal <handle> --text "docker compose run --rm tg-archive --sync" --enter --json
 ```
 
 **Что произойдёт:**
@@ -88,6 +88,10 @@ orca terminal send --terminal <handle> --text "docker compose run --rm tg-archiv
 3. Запросит номер телефона (подставится из config.yaml автоматически)
 4. Запросит SMS-код — **ввести вручную в терминале Orca**
 5. При успехе создастся `session.session` в Docker volume
+
+**Важно:** флаг `--new` авторизацию не выполняет — он копирует bundled-шаблон
+сайта в `/data/example`. Реальная авторизация происходит при первом `--sync`:
+Telethon (`client.start()`) сам запрашивает телефон и код в интерактивном режиме.
 
 **Проверка:** После ввода кода должен появиться лог:
 ```
@@ -231,10 +235,17 @@ Telegram может ограничивать скорость (FloodWait). tg-ar
 
 ```json
 {
-  "mcpServers": {
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
     "watchdog": {
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "--network", "watchdog_default", "watchdog-mcp"]
+      "type": "local",
+      "command": [
+        "docker", "run", "-i", "--rm",
+        "-v", "telegram_data:/data",
+        "-e", "WATCHDOG_DB_PATH=/data/data.sqlite",
+        "watchdog-watchdog-mcp:latest"
+      ],
+      "enabled": true
     }
   }
 }
