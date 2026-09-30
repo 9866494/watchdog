@@ -75,10 +75,12 @@ docker run --rm -v telegram_data:/data alpine rm -f /data/config.yaml
 
 ## Подключение MCP-клиента
 
-MCP-сервер — stdio-процесс, клиент спавнит его сам. Универсальная команда:
+MCP-сервер — stdio-процесс, клиент спавнит его сам. Универсальная команда
+(монтирование docker.sock обязательно: tools `authorize`, `run_sync`,
+`list_available_chats` управляют контейнером tg-archive через Docker API):
 
 ```
-docker run -i --rm -v telegram_data:/data -e WATCHDOG_DB_PATH=/data/data.sqlite watchdog-mcp:latest
+docker run -i --rm -v telegram_data:/data -v /var/run/docker.sock:/var/run/docker.sock -e WATCHDOG_DB_PATH=/data/data.sqlite watchdog-mcp:latest
 ```
 
 ### opencode
@@ -94,6 +96,7 @@ docker run -i --rm -v telegram_data:/data -e WATCHDOG_DB_PATH=/data/data.sqlite 
     "watchdog": {
       "command": "docker",
       "args": ["run", "-i", "--rm", "-v", "telegram_data:/data",
+               "-v", "/var/run/docker.sock:/var/run/docker.sock",
                "-e", "WATCHDOG_DB_PATH=/data/data.sqlite", "watchdog-mcp:latest"]
     }
   }
@@ -162,6 +165,78 @@ docker compose --profile sync --profile mcp down
 
 Синхронизация хранит данные в Docker volume `telegram_data` — переживает
 пересоздание контейнеров и обновление репозитория.
+
+## Автономный сетап агентом (чат-режим)
+
+Сценарий: агент работает с машиной через канал (Telegram, Discord), человек
+дает только данные в чат. Агент выполняет всё сам, PTY не нужен.
+
+Агент запрашивает у человека в чат: `api_id`, `api_hash`, номер телефона,
+SMS-код (придёт после первого шага авторизации), пароль 2FA (если включён).
+
+### Шаг 1. Развёртывание
+
+```bash
+git clone https://github.com/9866494/watchdog.git && cd watchdog
+cat > .env <<EOF
+TG_API_ID=<из чата>
+TG_API_HASH=<из чата>
+TG_PHONE=<из чата>
+TG_CHAT_IDS=<из чата или позднее через --chats>
+EOF
+docker compose build tg-archive watchdog-mcp
+```
+
+### Шаг 2. config.yaml до авторизации
+
+Entrypoint генерирует `config.yaml` из `.env` при любом запуске контейнера.
+`--new` копирует шаблон сайта и выходит — неинтерактивно:
+
+```bash
+docker compose run --rm tg-archive --new
+```
+
+### Шаг 3. Подключить watchdog MCP к агенту
+
+См. раздел «Подключение MCP-клиента». Для opencode конфиг уже в `opencode.json`.
+Монтирование `/var/run/docker.sock` обязательно — через него работают tools
+`authorize` и `run_sync`.
+
+### Шаг 4. Авторизация через MCP tools
+
+Человек вводит SMS-код прямо в чат — агент прокидывает его в Telegram:
+
+```
+authorize(phone="+79991234567")          → status: code_sent
+# человек прислал код в чат
+authorize(phone, code="12345")           → status: authorized
+```
+
+При 2FA: `authorize(phone, code)` вернёт `password_needed`, агент запросит
+пароль в чат и повторит `authorize(phone, code, password)`.
+
+После `authorized` сессия сохранена, синхронизация идёт в фоне. Дальше:
+`list_available_chats` — узнать ID чатов, `add_chat(chat_ref)` — добавить чат
+в мониторинг, `run_sync` — обновить данные.
+
+### Шаг 5. Проверка
+
+```bash
+./scripts/bootstrap.sh --check   # сессия, база
+./scripts/bootstrap.sh --verify  # MCP-сервер отвечает
+```
+
+### Fallback без MCP-клиента
+
+Если MCP-клиент ещё не подключен, авторизация возможна пайпом stdin
+(код запрашивать в чат заранее; при 2FA путь не работает — используйте MCP):
+
+```bash
+docker compose run -T --rm tg-archive --sync <<EOF
++79991234567
+12345
+EOF
+```
 
 ## Разработка
 
