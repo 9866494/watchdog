@@ -557,7 +557,7 @@ class Sync:
 
     def _get_media(self, msg):
         if isinstance(msg.media, telethon.tl.types.MessageMediaWebPage) and \
-                not isinstance(msg.media.webpage, telethon.tl.types.WebPageEmpty):
+                isinstance(msg.media.webpage, telethon.tl.types.WebPage):
             return Media(
                 id=msg.id,
                 type="webpage",
