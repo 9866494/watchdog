@@ -251,7 +251,7 @@ class FakeSync(Sync):
     def _get_group_id(self, group):
         return int(group)
 
-    def _fetch_messages(self, group, offset_id, ids=None):
+    def _fetch_messages(self, group, offset_id, ids=None, **kwargs):
         self.fetch_calls.append((group, offset_id, ids))
         batch = self.feed.get(group, [])
         self.feed[group] = []

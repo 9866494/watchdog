@@ -149,6 +149,62 @@ class DB:
         else:
             self._migrate()
 
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS sync_gaps (
+            chat_id INTEGER NOT NULL,
+            floor_id INTEGER NOT NULL,
+            offset_id INTEGER NOT NULL,
+            PRIMARY KEY (chat_id, floor_id)
+        )""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS topic_field_versions (
+            chat_id INTEGER NOT NULL,
+            thread_id INTEGER NOT NULL,
+            field TEXT NOT NULL,
+            message_id INTEGER NOT NULL,
+            PRIMARY KEY (chat_id, thread_id, field)
+        )""")
+        self.conn.commit()
+
+    def record_topic_action(self, chat_id, thread_id, message_id, title=None,
+                            closed=None, creator_id=None, date=None):
+        """Старые события не затирают более свежие значения полей топика."""
+        self.conn.execute(
+            'INSERT OR IGNORE INTO topics (chat_id, thread_id, closed) VALUES (?, ?, 0)',
+            (chat_id, thread_id))
+        if date is not None:
+            self.conn.execute(
+                'UPDATE topics SET creator_id=?, date=? WHERE chat_id=? AND thread_id=?',
+                (creator_id, date.strftime('%Y-%m-%d %H:%M:%S'), chat_id, thread_id))
+        for field, value in [('title', title), ('closed', closed)]:
+            if value is None:
+                continue
+            version = self.conn.execute(
+                'SELECT message_id FROM topic_field_versions '
+                'WHERE chat_id=? AND thread_id=? AND field=?',
+                (chat_id, thread_id, field)).fetchone()
+            if version and version[0] >= message_id:
+                continue
+            self.conn.execute(
+                'UPDATE topics SET {}=? WHERE chat_id=? AND thread_id=?'.format(field),
+                (int(bool(value)) if field == 'closed' else value, chat_id, thread_id))
+            self.conn.execute('INSERT OR REPLACE INTO topic_field_versions VALUES (?, ?, ?, ?)',
+                              (chat_id, thread_id, field, message_id))
+
+    def get_sync_gaps(self, chat_id):
+        """Незагруженные промежутки истории, начиная с самого свежего."""
+        return self.conn.execute(
+            'SELECT floor_id, offset_id FROM sync_gaps '
+            'WHERE chat_id = ? ORDER BY floor_id DESC', (chat_id,)).fetchall()
+
+    def save_sync_gap(self, chat_id, floor_id, offset_id):
+        self.conn.execute(
+            'INSERT OR REPLACE INTO sync_gaps VALUES (?, ?, ?)',
+            (chat_id, floor_id, offset_id))
+
+    def delete_sync_gap(self, chat_id, floor_id):
+        self.conn.execute(
+            'DELETE FROM sync_gaps WHERE chat_id = ? AND floor_id = ?',
+            (chat_id, floor_id))
+
     def _migrate(self):
         """Apply incremental schema migrations to DBs created by older versions."""
         cur = self.conn.cursor()
@@ -461,7 +517,7 @@ class DB:
         cur.execute("""
             SELECT DISTINCT thread_id FROM messages
             WHERE chat_id = ? AND thread_id IS NOT NULL
-            AND thread_id NOT IN (SELECT thread_id FROM topics WHERE chat_id = ?)
+            AND thread_id NOT IN (SELECT thread_id FROM topics WHERE chat_id = ? AND title IS NOT NULL)
             """, (chat_id, chat_id))
         return [r[0] for r in cur.fetchall()]
 

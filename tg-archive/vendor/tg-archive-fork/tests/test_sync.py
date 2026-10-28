@@ -79,9 +79,14 @@ class FakeSync(Sync):
         self.bio_calls.append(user_id)
         return self.bios.get(user_id)
 
-    def _fetch_messages(self, group, offset_id, ids=None):
+    def _fetch_messages(self, group, offset_id, ids=None, *, newest_first=False,
+                        min_id=0, limit=None):
         self.fetch_calls.append((group, offset_id, ids))
         batch = self.feed.get(group, [])
+        if newest_first:
+            return sorted([m for m in batch if m.id > min_id
+                           and (not offset_id or m.id < offset_id)],
+                          key=lambda m: m.id, reverse=True)[:limit]
         self.feed[group] = []
         return batch
 
@@ -166,7 +171,7 @@ def test_sync_resumes_from_per_chat_last_id(tmp_path):
     first_offsets = {}
     for group, offset, _ in s.fetch_calls:
         first_offsets.setdefault(group, offset)
-    assert first_offsets == {-1001: 5, -1002: 0}
+    assert first_offsets == {-1001: 0, -1002: 0}
 
 
 def test_get_chats_prefers_chats_over_group():

@@ -74,8 +74,11 @@ class Sync:
             return 0
 
         total = 0
-        for chat_id, _ in resolved:
-            total += self._sync_chat(chat_id, ids, from_id)
+        if ids or from_id:
+            for chat_id, _ in resolved:
+                total += self._sync_chat(chat_id, ids, from_id)
+        else:
+            total = self._sync_newest(resolved)
 
         if self.config.get("fetch_user_bios", False):
             self._fetch_user_bios()
@@ -85,6 +88,94 @@ class Sync:
             self.finish_takeout()
         logging.info(
             "finished. fetched {} messages across {} chat(s)".format(total, len(resolved)))
+
+    def _sync_newest(self, resolved):
+        """Сначала свежие сообщения всех чатов, затем история от новых к старым."""
+        counts = {chat_id: 0 for chat_id, _ in resolved}
+        failed = set()
+        entities = {}
+        limit = self.config['fetch_limit']
+
+        def allowed(chat_id):
+            return chat_id not in failed and (not limit or counts[chat_id] < limit)
+
+        def fetch(chat_id, floor_id, offset_id, size):
+            if limit:
+                size = min(size, limit - counts[chat_id])
+            try:
+                count = self._sync_newest_page(chat_id, floor_id, offset_id, size)
+                counts[chat_id] += count
+            except Exception:
+                self.db.conn.rollback()
+                failed.add(chat_id)
+                logging.exception('[%s] ошибка импорта; остальные чаты продолжат загрузку', chat_id)
+
+        def refresh():
+            for chat_id, _ in resolved:
+                if not allowed(chat_id):
+                    continue
+                try:
+                    if chat_id not in entities:
+                        entity = self._get_entity(chat_id)
+                        self._upsert_chat(entity)
+                        self.db.commit()
+                        entities[chat_id] = entity
+                    floor_id, _ = self.db.get_last_message_id(chat_id=chat_id)
+                    fetch(chat_id, floor_id, 0,
+                          min(100, self.config['fetch_batch_size']))
+                except Exception:
+                    self.db.conn.rollback()
+                    failed.add(chat_id)
+                    logging.exception('[%s] ошибка обновления чата', chat_id)
+
+        refresh()
+        refreshed_at = time.monotonic()
+        while True:
+            pending = [(chat_id, gaps[0]) for chat_id, _ in resolved
+                       if allowed(chat_id)
+                       and (gaps := self.db.get_sync_gaps(chat_id))]
+            if not pending:
+                break
+            for chat_id, (floor_id, offset_id) in pending:
+                fetch(chat_id, floor_id, offset_id, self.config['fetch_batch_size'])
+                if time.monotonic() - refreshed_at >= 300:
+                    refresh()
+                    refreshed_at = time.monotonic()
+            if any(allowed(chat_id) and self.db.get_sync_gaps(chat_id)
+                   for chat_id, _ in resolved):
+                time.sleep(self.config['fetch_wait'])
+
+        for chat_id, entity in entities.items():
+            if chat_id not in failed:
+                self._backfill_topics(entity, chat_id)
+                logging.info('[%s] загружено %s сообщений; осталось промежутков: %s',
+                             chat_id, counts[chat_id], len(self.db.get_sync_gaps(chat_id)))
+        if failed:
+            raise RuntimeError('Не удалось загрузить чаты: {}'.format(sorted(failed)))
+        return sum(counts.values())
+
+    def _sync_newest_page(self, chat_id, floor_id, offset_id, size):
+        """Сообщения и позиция истории фиксируются одной транзакцией."""
+        count = 0
+        oldest_id = None
+        for m in self._get_messages(chat_id, offset_id, newest_first=True,
+                                    min_id=floor_id, limit=size):
+            if m is None:
+                continue
+            self.db.insert_user(m.user)
+            if m.media:
+                self.db.insert_media(m.media)
+            self.db.insert_message(m)
+            oldest_id = m.id
+            count += 1
+        if oldest_id is not None:
+            self.db.save_sync_gap(chat_id, floor_id, oldest_id)
+        elif offset_id:
+            self.db.delete_sync_gap(chat_id, floor_id)
+        self.db.commit()
+        logging.info('[%s] от новых к старым: загружено %s, нижняя граница %s, позиция %s',
+                     chat_id, count, floor_id, oldest_id or offset_id)
+        return count
 
     def _resolve_chat_id(self, chat):
         """
@@ -283,8 +374,13 @@ class Sync:
     def finish_takeout(self):
         self.client.__exit__(None, None, None)
 
-    def _get_messages(self, group, offset_id, ids=None) -> Message:
-        messages = self._fetch_messages(group, offset_id, ids)
+    def _get_messages(self, group, offset_id, ids=None, *, newest_first=False,
+                      min_id=0, limit=None) -> Message:
+        if newest_first:
+            messages = self._fetch_messages(group, offset_id, ids,
+                                            newest_first=True, min_id=min_id, limit=limit)
+        else:
+            messages = self._fetch_messages(group, offset_id, ids)
         # https://docs.telethon.dev/en/latest/quick-references/objects-reference.html#message
         for m in messages:
             if not m:
@@ -320,17 +416,18 @@ class Sync:
             # Forum topic metadata from service messages.
             if m.action:
                 if isinstance(m.action, telethon.tl.types.MessageActionTopicCreate):
-                    self.db.upsert_topic(Topic(
+                    self.db.record_topic_action(
                         chat_id=group,
                         thread_id=m.id,
+                        message_id=m.id,
                         title=m.action.title,
                         creator_id=getattr(m, "sender_id", None),
                         date=m.date,
-                        closed=0))
+                        closed=False)
                 elif isinstance(m.action, telethon.tl.types.MessageActionTopicEdit):
                     thread_id = self._get_thread_id(m)
                     if thread_id:
-                        self.db.update_topic(group, thread_id,
+                        self.db.record_topic_action(group, thread_id, m.id,
                                              title=getattr(m.action, "title", None),
                                              closed=getattr(m.action, "closed", None))
 
@@ -340,7 +437,7 @@ class Sync:
                 date=m.date,
                 edit_date=m.edit_date,
                 content=sticker if sticker else m.raw_text,
-                reply_to=m.reply_to_msg_id if m.reply_to and m.reply_to.reply_to_msg_id else None,
+                reply_to=getattr(m.reply_to, "reply_to_msg_id", None),
                 user=self._get_user(m.sender, m.chat),
                 media=med,
                 chat_id=group,
@@ -420,13 +517,14 @@ class Sync:
             if not m or not m.action or \
                     not isinstance(m.action, telethon.tl.types.MessageActionTopicCreate):
                 continue
-            self.db.upsert_topic(Topic(
+            self.db.record_topic_action(
                 chat_id=chat_id,
                 thread_id=m.id,
+                message_id=m.id,
                 title=m.action.title,
                 creator_id=getattr(m, "sender_id", None),
                 date=m.date,
-                closed=0))
+                closed=False)
         self.db.commit()
 
     def _fetch_messages_by_ids(self, entity, ids):
@@ -461,21 +559,24 @@ class Sync:
                 "error fetching bio for user {}: {}".format(user_id, e))
             return None
 
-    def _fetch_messages(self, group, offset_id, ids=None) -> Message:
+    def _fetch_messages(self, group, offset_id, ids=None, *, newest_first=False,
+                        min_id=0, limit=None) -> Message:
         try:
             if self.config.get("use_takeout", False):
                 wait_time = 0
             else:
                 wait_time = None
             messages = self.client.get_messages(group, offset_id=offset_id,
-                                                limit=self.config["fetch_batch_size"],
+                                                limit=limit or self.config["fetch_batch_size"],
                                                 wait_time=wait_time,
                                                 ids=ids,
-                                                reverse=True)
+                                                min_id=min_id,
+                                                reverse=not newest_first)
             return messages
         except errors.FloodWaitError as e:
             logging.info(
                 "flood waited: have to wait {} seconds".format(e.seconds))
+            raise
 
     def _get_user(self, u, chat) -> User:
         tags = []
