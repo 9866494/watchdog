@@ -6,7 +6,7 @@ Watchdog — сервис мониторинга Telegram-чатов. Пасси
 собирает сообщения, профили участников и метаданные через MTProto-клиент (Telethon).
 Данные читаются через MCP-сервер (tools `search_messages`, `get_chat_stats` и др.).
 
-Стек: Docker Compose + tg-archive (Telethon → SQLite) + watchdog-mcp (Python MCP, stdio).
+Стек: Docker Compose + tg-archive (Telethon → SQLite) + watchdog-mcp (Python MCP, Streamable HTTP; stdio опционально).
 
 ---
 
@@ -46,7 +46,7 @@ Context7 MCP-сервер **до** веб-поиска:
 ./scripts/bootstrap.sh          # полный сетап: проверки → env → build → auth → sync → verify
 ./scripts/bootstrap.sh --check  # только проверки (docker, .env, сессия, БД)
 ./scripts/bootstrap.sh --sync   # инкрементальная синхронизация чатов
-./scripts/bootstrap.sh --verify # проверка ответа MCP-сервера (stdio handshake)
+./scripts/bootstrap.sh --verify # поднять MCP-сервис и проверить HTTP handshake
 ```
 
 Скрипт идемпотентен: повторный запуск делает только недостающие шаги.
@@ -62,7 +62,7 @@ MCP-путь из правила 5.
 1. Запросить у человека в чат: api_id, api_hash, телефон, SMS-код, пароль 2FA
 2. `git clone` → создать `.env` → `docker compose build`
 3. `docker compose run --rm tg-archive --new` — неинтерактивно создаёт config.yaml
-4. Подключить watchdog MCP-клиент (монтирование docker.sock обязательно)
+4. Запустить `docker compose up -d watchdog-mcp` и подключить клиент к `http://127.0.0.1:8040/mcp`
 5. Авторизация через MCP tool `authorize(phone)` → код из чата → `authorize(phone, code)`
 
 Interactive-запуск `docker compose run --rm tg-archive --sync` в PTY — только

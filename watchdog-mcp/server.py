@@ -1321,15 +1321,20 @@ async def authorize(
 
 def main():
     """Точка входа."""
+    transport = os.environ.get("WATCHDOG_TRANSPORT", "streamable-http")
+    host = os.environ.get("WATCHDOG_HOST", "0.0.0.0")
+    port = int(os.environ.get("WATCHDOG_PORT", "8040"))
+
     logger.info("Запуск Watchdog MCP сервера...")
     logger.info(f"Путь к БД: {DB_PATH}")
+    logger.info(f"Транспорт: {transport}, host: {host}, port: {port}")
 
-    # Инициализация БД
     init_db()
 
-    # Запуск MCP-сервера через stdio
-    logger.info("MCP-сервер запущен (stdio transport)")
-    mcp.run(transport="stdio")
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(transport=transport, host=host, port=port)
 
 
 if __name__ == "__main__":

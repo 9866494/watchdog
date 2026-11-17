@@ -19,7 +19,7 @@
                                                               │
                                                               ▼
 ┌─────────────────┐
-│   MCP-клиент    │   opencode, openclaw, любой stdio-клиент
+│   MCP-клиент    │   opencode, Kimi Code, любой HTTP-клиент
 └─────────────────┘
 ```
 
@@ -62,7 +62,7 @@ docker run --rm -v telegram_data:/data alpine rm -f /data/config.yaml
 ./scripts/bootstrap.sh --build   # пересборка образов
 ./scripts/bootstrap.sh --sync    # инкрементальная синхронизация
 ./scripts/bootstrap.sh --chats   # список чатов аккаунта
-./scripts/bootstrap.sh --verify  # stdio handshake MCP-сервера
+./scripts/bootstrap.sh --verify  # HTTP handshake MCP-сервера
 ```
 
 ## Получение Telegram API credentials
@@ -75,32 +75,56 @@ docker run --rm -v telegram_data:/data alpine rm -f /data/config.yaml
 
 ## Подключение MCP-клиента
 
-MCP-сервер — stdio-процесс, клиент спавнит его сам. Универсальная команда
-(монтирование docker.sock обязательно: tools `authorize`, `run_sync`,
-`list_available_chats` управляют контейнером tg-archive через Docker API):
+MCP-сервер работает постоянно в Docker. Запуск:
 
-```
-docker run -i --rm -v telegram_data:/data -v /var/run/docker.sock:/var/run/docker.sock -e WATCHDOG_DB_PATH=/data/data.sqlite watchdog-mcp:latest
+```bash
+docker compose up -d watchdog-mcp
 ```
 
-### opencode
+Endpoint: `http://127.0.0.1:8040/mcp`. Порт опубликован только на loopback.
+Compose монтирует `telegram_data` и `/var/run/docker.sock`: последний нужен tools
+`authorize`, `run_sync`, `list_available_chats`.
 
-Готовый конфиг уже в репозитории (`opencode.json`). Для другого проекта — скопировать
-блок `mcp` из него. Перезапустить opencode после изменения конфига.
+### Kimi Code
 
-### Claude Code и другие клиенты с JSON-конфигом
+В `~/.kimi-code/mcp.json` замени блок `watchdog` и перезапусти клиент:
 
 ```json
 {
   "mcpServers": {
     "watchdog": {
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-v", "telegram_data:/data",
-               "-v", "/var/run/docker.sock:/var/run/docker.sock",
-               "-e", "WATCHDOG_DB_PATH=/data/data.sqlite", "watchdog-mcp:latest"]
+      "enabled": true,
+      "url": "http://127.0.0.1:8040/mcp"
     }
   }
 }
+```
+
+### opencode
+
+Готовый конфиг лежит в `opencode.json`. Для другого проекта скопируй блок:
+
+```json
+{
+  "mcp": {
+    "watchdog": {
+      "type": "remote",
+      "url": "http://127.0.0.1:8040/mcp",
+      "enabled": true
+    }
+  }
+}
+```
+
+Перезапусти opencode после изменения конфига. Другие MCP-клиенты подключаются
+к тому же URL по Streamable HTTP.
+
+### stdio для старых клиентов
+
+stdio остаётся доступен при `WATCHDOG_TRANSPORT=stdio`:
+
+```bash
+docker run -i --rm -e WATCHDOG_TRANSPORT=stdio -v telegram_data:/data -v /var/run/docker.sock:/var/run/docker.sock -e WATCHDOG_DB_PATH=/data/data.sqlite watchdog-mcp:latest
 ```
 
 ### Tools MCP-сервера
@@ -158,7 +182,7 @@ FTS5 индекс создаётся автоматически при перв�
 ./scripts/bootstrap.sh --check
 
 # Остановка и очистка
-docker compose --profile sync --profile mcp down
+docker compose down
 
 # Логи последнего прогона синхронизации — в выводе команды --sync
 ```
@@ -196,11 +220,15 @@ Entrypoint генерирует `config.yaml` из `.env` при любом за
 docker compose run --rm tg-archive --new
 ```
 
-### Шаг 3. Подключить watchdog MCP к агенту
+### Шаг 3. Запустить MCP и подключить агента
 
-См. раздел «Подключение MCP-клиента». Для opencode конфиг уже в `opencode.json`.
-Монтирование `/var/run/docker.sock` обязательно — через него работают tools
-`authorize` и `run_sync`.
+```bash
+docker compose up -d watchdog-mcp
+```
+
+Подключи клиент к `http://127.0.0.1:8040/mcp` по разделу «Подключение MCP-клиента».
+Для opencode конфиг уже лежит в `opencode.json`. Compose монтирует
+`/var/run/docker.sock` — через него работают tools `authorize` и `run_sync`.
 
 ### Шаг 4. Авторизация через MCP tools
 
@@ -240,8 +268,9 @@ EOF
 
 ## Разработка
 
-MCP-сервер написан на Python с использованием SDK `mcp[cli]`. Логирование идёт
-в stderr (не stdout), чтобы не ломать JSON-RPC через stdio.
+MCP-сервер написан на Python с SDK `mcp[cli]`. По умолчанию он слушает
+Streamable HTTP на `0.0.0.0:8040`. Логирование идёт в stderr, чтобы не ломать
+JSON-RPC при запуске с `WATCHDOG_TRANSPORT=stdio`.
 
 Для локальной разработки без Docker:
 
@@ -251,6 +280,7 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 export WATCHDOG_DB_PATH=/path/to/data.sqlite
+export WATCHDOG_HOST=127.0.0.1
 python server.py
 ```
 

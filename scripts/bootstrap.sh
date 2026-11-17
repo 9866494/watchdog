@@ -8,7 +8,7 @@
 #   ./scripts/bootstrap.sh --build    пересобрать образы
 #   ./scripts/bootstrap.sh --sync     инкрементальная синхронизация
 #   ./scripts/bootstrap.sh --chats    список доступных чатов авторизованного аккаунта
-#   ./scripts/bootstrap.sh --verify   проверка MCP-сервера (stdio handshake)
+#   ./scripts/bootstrap.sh --verify   проверка MCP-сервера (HTTP handshake)
 #
 # Скрипт идемпотентен: повторный запуск делает только недостающие шаги.
 # Первый --sync интерактивен: Telethon запрашивает телефон, SMS-код и (при 2FA) пароль.
@@ -93,21 +93,27 @@ list_chats() {
 
 verify_mcp() {
     docker image inspect "$IMAGE_MCP" >/dev/null 2>&1 || fail "образ ${IMAGE_MCP} не собран"
-    say "проверяю MCP-сервер (stdio handshake)..."
-    local resp
-    resp=$( (printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"bootstrap","version":"1.0"}}}'
-             sleep 2
-             printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-             sleep 1
-             printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
-             sleep 3) \
-           | timeout 30 docker run -i --rm -v telegram_data:/data -e WATCHDOG_DB_PATH=/data/data.sqlite "$IMAGE_MCP" 2>/dev/null || true)
-    echo "$resp" | grep -q '"serverInfo"' || fail "MCP-сервер не ответил на initialize"
-    echo "$resp" | grep -q '"tools"' || fail "MCP-сервер не ответил на tools/list"
-    local count
-    count=$(echo "$resp" | grep -o '"name":"[a-z_]*"' | wc -l)
-    ok "MCP-сервер отвечает, tools объявлены (${count})"
-    check_db && ok "база данных на месте (data.sqlite в volume)" || say "база пуста — чаты ещё не синхронизировались"
+    command -v curl >/dev/null || fail "curl не установлен"
+    say "запускаю MCP-сервис и проверяю HTTP handshake..."
+    docker compose up -d watchdog-mcp
+
+    local resp=""
+    for _ in {1..30}; do
+        resp=$(curl -sS --max-time 5 -X POST http://127.0.0.1:8040/mcp \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"bootstrap","version":"1.0"}}}' \
+            2>/dev/null || true)
+        if grep -q '"serverInfo"' <<<"$resp"; then
+            ok "MCP-сервер отвечает по HTTP: http://127.0.0.1:8040/mcp"
+            check_db && ok "база данных на месте (data.sqlite в volume)" || say "база пуста — чаты ещё не синхронизировались"
+            return
+        fi
+        sleep 1
+    done
+
+    docker compose logs --tail=20 watchdog-mcp >&2
+    fail "MCP-сервер не ответил на initialize"
 }
 
 # ---------- маршрутизация ----------

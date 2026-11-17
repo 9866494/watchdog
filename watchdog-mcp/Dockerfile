@@ -12,5 +12,6 @@ COPY server.py .
 # Данные: SQLite от tg-archive
 VOLUME ["/data"]
 
-# MCP работает через stdio
+# По умолчанию MCP слушает Streamable HTTP на порту 8040
+EXPOSE 8040
 CMD ["python", "server.py"]
